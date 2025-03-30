@@ -23,6 +23,23 @@ pub async fn web_socket_handler(
 
 async fn handle_socket(mut socket: WebSocket, pool: PgPool) {
     info!("Web socket connection");
+
+    //Load previous messages
+
+    let messages = sqlx::query!("SELECT username, message FROM messages ORDER BY timestamp ASC")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+    for msg in messages {
+        let _ = socket
+            .send(axum::extract::ws::Message::Text(format!(
+                "{}: {}",
+                msg.username, msg.message
+            )))
+            .await;
+    }
+
     while let Some(Ok(msg)) = socket.recv().await {
         if let axum::extract::ws::Message::Text(text) = msg {
             info!("Received: {}", text);
@@ -46,6 +63,11 @@ async fn handle_socket(mut socket: WebSocket, pool: PgPool) {
                 info!("Error sending message: {}", e);
                 break;
             }
+
+            // Send the message back to the client
+            let _ = socket
+                .send(axum::extract::ws::Message::Text(format!("User1: {}", text)))
+                .await;
         }
     }
 }
