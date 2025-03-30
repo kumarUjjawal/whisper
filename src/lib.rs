@@ -17,9 +17,8 @@ pub async fn run() {
         .merge(routes::get_routes());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    let listener = TcpListener::bind(addr).await.unwrap();
+    let server = axum::Server::bind(&addr).serve(app.into_make_service());
+    server.await.unwrap();
 
     println!("Server running on http://{}", addr);
-
-    axum::serve(listener, app).await.unwrap();
 }
