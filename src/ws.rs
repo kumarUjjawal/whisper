@@ -1,40 +1,57 @@
 use axum::{
-    extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade},
+    extract::ws::{WebSocket, WebSocketUpgrade},
+    extract::State,
     response::IntoResponse,
     routing::get,
     Router,
 };
-use futures::StreamExt;
 // use futures::{SinkExt, StreamExt};
+use sqlx::PgPool;
 use tracing::info;
 
-pub async fn web_socket_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(handle_socket)
+pub async fn web_socket_handler(
+    ws: WebSocketUpgrade,
+    State(pool): State<PgPool>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| {
+        let pool = pool.clone();
+        async move {
+            handle_socket(socket, pool).await;
+        }
+    })
 }
 
-async fn handle_socket(mut socket: WebSocket) {
+async fn handle_socket(mut socket: WebSocket, pool: PgPool) {
     info!("Web socket connection");
-    while let Some(Ok(msg)) = socket.next().await {
-        match msg {
-            AxumMessage::Text(text) => {
-                info!("Received..{}", text);
-                if let Err(e) = socket
-                    .send(AxumMessage::Text(format!("Echo: {}", text)))
-                    .await
-                {
-                    info!("Error sending message {}", e);
-                    break;
-                }
+    while let Some(Ok(msg)) = socket.recv().await {
+        if let axum::extract::ws::Message::Text(text) = msg {
+            info!("Received: {}", text);
+
+            // Save message in the database
+            if let Err(e) = sqlx::query!(
+                "INSERT INTO messages (username, message) VALUES ($1, $2)",
+                "User1",
+                text
+            )
+            .execute(&pool)
+            .await
+            {
+                info!("Failed to save message: {}", e);
             }
-            AxumMessage::Close(_) => {
-                info!("Websocket closed");
+
+            if let Err(e) = socket
+                .send(axum::extract::ws::Message::Text(format!("Echo: {}", text)))
+                .await
+            {
+                info!("Error sending message: {}", e);
                 break;
             }
-            _ => {}
         }
     }
 }
 
-pub fn ws_routes() -> Router {
-    Router::new().route("/ws", get(web_socket_handler))
+pub fn ws_routes(pool: PgPool) -> Router {
+    Router::new()
+        .route("/ws", get(web_socket_handler))
+        .with_state(pool)
 }
