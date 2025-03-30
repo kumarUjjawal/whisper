@@ -5,7 +5,7 @@ use axum::{
     routing::get,
     Router,
 };
-// use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,13 +26,16 @@ pub async fn web_socket_handler(
     })
 }
 
-pub async fn handle_socket(mut socket: WebSocket, pool: PgPool, state: SharedState) {
+pub async fn handle_socket(socket: WebSocket, pool: PgPool, state: SharedState) {
     info!("WebSocket connection");
+
+    // Split the socket into a sender and receiver
+    let (mut sender, mut receiver) = socket.split();
 
     let mut username = String::new();
 
     // Step 1: Identify the user
-    if let Some(Ok(Message::Text(name))) = socket.recv().await {
+    if let Some(Ok(Message::Text(name))) = receiver.next().await {
         username = name.trim().to_string();
         info!("User {} connected", username);
 
@@ -50,28 +53,35 @@ pub async fn handle_socket(mut socket: WebSocket, pool: PgPool, state: SharedSta
         }
     }
 
-    // Step 2: Add user to shared state
-    let (tx, mut rx) = broadcast::channel::<String>(10);
-    state.lock().await.insert(username.clone(), tx.clone());
+    // Add user to shared state with a broadcast channel
+    let (tx, _rx) = broadcast::channel::<String>(10);
+    {
+        let mut state_guard = state.lock().await;
+        state_guard.insert(username.clone(), tx.clone());
 
-    // Step 3: Use Arc<tokio::sync::Mutex<WebSocket>> for async access
-    let socket = Arc::new(Mutex::new(socket));
+        info!(
+            "📡 Current online users: {:?}",
+            state_guard.keys().collect::<Vec<_>>()
+        );
+    }
 
-    // Spawn a task to listen for incoming messages for this user
-    let socket_rx = Arc::clone(&socket);
+    // Subscribe to the channel
+    let mut rx = tx.subscribe();
+
+    // Spawn a task to listen for broadcast messages and send them to the WebSocket
     let user_clone = username.clone();
-    tokio::spawn(async move {
+    let sender_handle = tokio::spawn(async move {
         while let Ok(msg) = rx.recv().await {
-            let mut socket_guard = socket_rx.lock().await;
-            if let Err(e) = socket_guard.send(Message::Text(msg)).await {
-                info!("Error sending message to {}: {}", user_clone, e);
+            info!("🔔 Delivering message to {}: {}", user_clone, msg);
+            if let Err(e) = sender.send(Message::Text(msg)).await {
+                info!("❌ Error sending message to {}: {}", user_clone, e);
                 break;
             }
         }
     });
 
-    // Step 4: Handle incoming messages from the user
-    while let Some(Ok(msg)) = socket.lock().await.recv().await {
+    // Handle incoming messages from the user
+    while let Some(Ok(msg)) = receiver.next().await {
         if let Message::Text(text) = msg {
             let parts: Vec<&str> = text.splitn(2, ':').collect();
             if parts.len() == 2 {
@@ -100,8 +110,10 @@ pub async fn handle_socket(mut socket: WebSocket, pool: PgPool, state: SharedSta
         }
     }
 
-    // Step 5: Remove user from shared state when they disconnect
+    // Clean up when user disconnects
+    let _ = sender_handle.abort(); // Abort the sender task
     state.lock().await.remove(&username);
+    info!("User {} disconnected", username);
 }
 
 pub fn ws_routes(pool: PgPool) -> Router {
