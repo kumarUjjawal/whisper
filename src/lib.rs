@@ -1,5 +1,5 @@
 pub mod db;
-pub mod entity; // New module for Sea-ORM entities
+pub mod entity;
 pub mod handlers;
 pub mod models;
 pub mod routes;
@@ -7,7 +7,6 @@ pub mod ws;
 
 use axum::{routing::get, Router};
 use dotenvy::dotenv;
-use sea_orm::DatabaseConnection;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tracing_subscriber;
@@ -16,7 +15,6 @@ pub async fn run() {
     dotenv().ok();
     tracing_subscriber::fmt::init();
 
-    // Replace pool with Sea-ORM db connection
     let db = db::connect_database().await;
 
     let app = Router::new()

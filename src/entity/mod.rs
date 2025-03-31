@@ -1,5 +1,3 @@
-use sea_orm::entity::prelude::*;
-
 pub mod messages;
 pub mod users;
 
