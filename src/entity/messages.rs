@@ -11,6 +11,7 @@ pub struct Model {
     pub message: String,
     #[sea_orm(created_at)]
     pub created_at: DateTimeUtc,
+    pub status: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -1,6 +1,6 @@
 # Rust WebSocket Chat Service
 
-A real-time chat backend built using Rust, Axum, WebSockets, and PostgreSQL. This service allows users to authenticate, send private messages, and store chat history.
+A real-time chat backend built using Rust, Axum, WebSockets, SeaORM, and PostgreSQL. This service allows users to authenticate, send private messages, and store chat history.
 
 ## 🚀 Features
 - **User Authentication**: Users must provide a username to connect.
@@ -16,7 +16,7 @@ A real-time chat backend built using Rust, Axum, WebSockets, and PostgreSQL. Thi
 - **Tokio** (Async runtime for Rust)
 - **SQLx** (Database interactions)
 - **PostgreSQL** (Relational database)
-
+- **SeaORM** (Object Relational Mapper)
 ---
 
 ## 🏗️ Setup & Installation

@@ -123,7 +123,10 @@ pub async fn handle_socket(socket: WebSocket, db: DatabaseConnection, state: Sha
                         if let Some(receiver_tx) = state.lock().await.get(&recipient) {
                             let _ = receiver_tx.send(full_message.clone());
                         }
-
+                        // Mark message as delivered
+                        mark_as_delivered(&db, sender_user.id, recipient_user.id)
+                            .await
+                            .unwrap();
                         // Also send to sender so they see their own messages
                         if let Some(sender_tx) = state.lock().await.get(&username) {
                             if recipient != username {
@@ -137,6 +140,7 @@ pub async fn handle_socket(socket: WebSocket, db: DatabaseConnection, state: Sha
                             sender_id: Set(sender_user.id),
                             receiver_id: Set(recipient_user.id),
                             message: Set(message_content),
+                            status: Set("unread".to_string()),
                             ..Default::default()
                         };
 
@@ -252,6 +256,8 @@ async fn send_message_history(
             .await
             .unwrap();
 
+        mark_as_read(db, user.id, partner_id).await.unwrap();
+
         // Process and send each message
         for msg in messages {
             // Find sender username
@@ -272,6 +278,52 @@ async fn send_message_history(
     let _ = sender
         .send(Message::Text("--- End of History ---".to_string()))
         .await;
+}
+
+async fn mark_as_delivered(
+    db: &DatabaseConnection,
+    sender_id: i32,
+    receiver_id: i32,
+) -> Result<(), sea_orm::DbErr> {
+    // Build an ActiveModel with the updated value
+    let active_model = messages::ActiveModel {
+        status: Set("delivered".to_string()), // Set the status field
+        ..Default::default()                  // Make sure the other fields are left as they are
+    };
+
+    // Update the matching records
+    messages::Entity::update_many()
+        .set(active_model) // Use the ActiveModel for the update
+        .filter(messages::Column::SenderId.eq(sender_id))
+        .filter(messages::Column::ReceiverId.eq(receiver_id))
+        .filter(messages::Column::Status.eq("sent"))
+        .exec(db)
+        .await?;
+
+    Ok(())
+}
+
+async fn mark_as_read(
+    db: &DatabaseConnection,
+    sender_id: i32,
+    receiver_id: i32,
+) -> Result<(), sea_orm::DbErr> {
+    // Build an ActiveModel with the updated value
+    let active_model = messages::ActiveModel {
+        status: Set("read".to_string()), // Set the status field
+        ..Default::default()             // Make sure the other fields are left as they are
+    };
+
+    // Update the matching records
+    messages::Entity::update_many()
+        .set(active_model) // Use the ActiveModel for the update
+        .filter(messages::Column::SenderId.eq(sender_id))
+        .filter(messages::Column::ReceiverId.eq(receiver_id))
+        .filter(messages::Column::Status.eq("delivered"))
+        .exec(db)
+        .await?;
+
+    Ok(())
 }
 
 pub fn ws_routes(db: DatabaseConnection) -> Router {
