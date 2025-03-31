@@ -1,3 +1,4 @@
+use crate::entity::{messages, users, Messages, Users};
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::State,
@@ -6,52 +7,68 @@ use axum::{
     Router,
 };
 use futures::{SinkExt, StreamExt};
-use sqlx::PgPool;
+use sea_orm::prelude::Expr;
+use sea_orm::sea_query::{Expr as SeaExpr, Func as SeaFunc};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait, Set,
+};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 use tracing::info;
-
 type SharedState = Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>;
 
 pub async fn web_socket_handler(
     ws: WebSocketUpgrade,
-    State((pool, state)): State<(PgPool, SharedState)>,
+    State((db, state)): State<(DatabaseConnection, SharedState)>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| {
-        let pool = pool.clone();
+        let db = db.clone();
         async move {
-            handle_socket(socket, pool, state).await;
+            handle_socket(socket, db, state).await;
         }
     })
 }
 
-pub async fn handle_socket(socket: WebSocket, pool: PgPool, state: SharedState) {
+pub async fn handle_socket(socket: WebSocket, db: DatabaseConnection, state: SharedState) {
     info!("WebSocket connection");
 
     // Split the socket into a sender and receiver
     let (mut sender, mut receiver) = socket.split();
 
-    let mut username = String::new();
+    let username = match receiver.next().await {
+        Some(Ok(Message::Text(name))) => {
+            let name = name.trim().to_string();
+            info!("User {} connected", name);
 
-    // Step 1: Identify the user
-    if let Some(Ok(Message::Text(name))) = receiver.next().await {
-        username = name.trim().to_string();
-        info!("User {} connected", username);
-
-        // Check if user exists in the database
-        let user = sqlx::query!("SELECT id FROM users WHERE username = $1", username)
-            .fetch_optional(&pool)
-            .await
-            .unwrap();
-
-        if user.is_none() {
-            sqlx::query!("INSERT INTO users (username) VALUES ($1)", username)
-                .execute(&pool)
+            // Check if user exists in the database, create if not
+            let user = Users::find()
+                .filter(users::Column::Username.eq(&name))
+                .one(&db)
                 .await
                 .unwrap();
+
+            if user.is_none() {
+                // Create new user
+                let user = users::ActiveModel {
+                    username: Set(name.clone()),
+                    ..Default::default()
+                };
+                let _ = user.insert(&db).await.unwrap();
+            }
+
+            name
         }
-    }
+        _ => {
+            // Invalid connection attempt without username
+            return;
+        }
+    };
+
+    // Send message history to the user
+    send_message_history(&mut sender, &username, &db).await;
 
     // Add user to shared state with a broadcast channel
     let (tx, _rx) = broadcast::channel::<String>(10);
@@ -86,26 +103,56 @@ pub async fn handle_socket(socket: WebSocket, pool: PgPool, state: SharedState) 
             let parts: Vec<&str> = text.splitn(2, ':').collect();
             if parts.len() == 2 {
                 let recipient = parts[0].trim().to_string();
-                let message = parts[1].trim().to_string();
-                let full_message = format!("{}: {}", username, message);
+                let message_content = parts[1].trim().to_string();
+                let full_message = format!("{}: {}", username, message_content);
 
-                // Send message to recipient if they are online
-                if let Some(receiver_tx) = state.lock().await.get(&recipient) {
-                    let _ = receiver_tx.send(full_message.clone());
+                // Get user IDs
+                let sender_user = Users::find()
+                    .filter(users::Column::Username.eq(&username))
+                    .one(&db)
+                    .await
+                    .unwrap()
+                    .unwrap();
+
+                let recipient_user = Users::find()
+                    .filter(users::Column::Username.eq(&recipient))
+                    .one(&db)
+                    .await
+                    .unwrap();
+
+                match recipient_user {
+                    Some(recipient_user) => {
+                        // Send message to recipient if they are online
+                        if let Some(receiver_tx) = state.lock().await.get(&recipient) {
+                            let _ = receiver_tx.send(full_message.clone());
+                        }
+
+                        // Also send to sender so they see their own messages
+                        if let Some(sender_tx) = state.lock().await.get(&username) {
+                            if recipient != username {
+                                // Only if not sending to self
+                                let _ = sender_tx.send(full_message.clone());
+                            }
+                        }
+
+                        // Store message in the database
+                        let message = messages::ActiveModel {
+                            sender_id: Set(sender_user.id),
+                            receiver_id: Set(recipient_user.id),
+                            message: Set(message_content),
+                            ..Default::default()
+                        };
+
+                        let _ = message.insert(&db).await.unwrap();
+                    }
+                    None => {
+                        // Notify sender that recipient doesn't exist
+                        if let Some(sender_tx) = state.lock().await.get(&username) {
+                            let _ = sender_tx
+                                .send(format!("System: User '{}' does not exist", recipient));
+                        }
+                    }
                 }
-
-                // Store message in the database
-                sqlx::query!(
-                    "INSERT INTO messages (sender_id, receiver_id, message) 
-                     VALUES ((SELECT id FROM users WHERE username=$1), 
-                             (SELECT id FROM users WHERE username=$2), $3)",
-                    username,
-                    recipient,
-                    message
-                )
-                .execute(&pool)
-                .await
-                .unwrap();
             }
         }
     }
@@ -116,10 +163,124 @@ pub async fn handle_socket(socket: WebSocket, pool: PgPool, state: SharedState) 
     info!("User {} disconnected", username);
 }
 
-pub fn ws_routes(pool: PgPool) -> Router {
+// Function to retrieve and send message history
+async fn send_message_history(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    username: &str,
+    db: &DatabaseConnection,
+) {
+    info!("Retrieving message history for {}", username);
+
+    // Get current user
+    let user = Users::find()
+        .filter(users::Column::Username.eq(username))
+        .one(db)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Get distinct conversation partners
+    // Query for users where the current user is the sender
+    let sent_partners: Vec<i32> = Messages::find()
+        .filter(messages::Column::SenderId.eq(user.id))
+        .select_only()
+        .column(messages::Column::ReceiverId)
+        .group_by(messages::Column::ReceiverId)
+        .into_tuple::<i32>()
+        .all(db)
+        .await
+        .unwrap();
+
+    // Query for users where the current user is the receiver
+    let received_partners: Vec<i32> = Messages::find()
+        .filter(messages::Column::ReceiverId.eq(user.id))
+        .select_only()
+        .column(messages::Column::SenderId)
+        .group_by(messages::Column::SenderId)
+        .into_tuple::<i32>()
+        .all(db)
+        .await
+        .unwrap();
+
+    // Merge and remove duplicates
+    let mut conversation_partners: Vec<i32> = sent_partners;
+    conversation_partners.extend(received_partners);
+    conversation_partners.sort();
+    conversation_partners.dedup();
+
+    if conversation_partners.is_empty() {
+        return;
+    }
+
+    // Send a history marker to indicate start of history
+    let _ = sender
+        .send(Message::Text("--- Message History ---".to_string()))
+        .await;
+
+    // Process each conversation partner
+    for partner_id in conversation_partners {
+        // Get partner username
+        let partner = Users::find_by_id(partner_id)
+            .one(db)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Send conversation header
+        let _ = sender
+            .send(Message::Text(format!(
+                "--- Conversation with {} ---",
+                partner.username
+            )))
+            .await;
+
+        // Get messages with this partner (limited to 50 most recent)
+        let messages = Messages::find()
+            .filter(
+                sea_orm::Condition::any()
+                    .add(
+                        sea_orm::Condition::all()
+                            .add(messages::Column::SenderId.eq(user.id))
+                            .add(messages::Column::ReceiverId.eq(partner_id)),
+                    )
+                    .add(
+                        sea_orm::Condition::all()
+                            .add(messages::Column::SenderId.eq(partner_id))
+                            .add(messages::Column::ReceiverId.eq(user.id)),
+                    ),
+            )
+            .order_by(messages::Column::CreatedAt, sea_orm::Order::Asc)
+            .limit(50)
+            .all(db)
+            .await
+            .unwrap();
+
+        // Process and send each message
+        for msg in messages {
+            // Find sender username
+            let sender_name = Users::find_by_id(msg.sender_id)
+                .one(db)
+                .await
+                .unwrap()
+                .unwrap()
+                .username;
+
+            // Format and send message
+            let formatted_msg = format!("{}: {}", sender_name, msg.message);
+            let _ = sender.send(Message::Text(formatted_msg)).await;
+        }
+    }
+
+    // Send end-of-history marker
+    let _ = sender
+        .send(Message::Text("--- End of History ---".to_string()))
+        .await;
+}
+
+pub fn ws_routes(db: DatabaseConnection) -> Router {
     let shared_state: SharedState = Arc::new(Mutex::new(HashMap::new()));
 
     Router::new()
         .route("/ws", get(web_socket_handler))
-        .with_state((pool, shared_state))
+        .with_state((db, shared_state))
 }

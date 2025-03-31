@@ -1,9 +1,10 @@
 use crate::ws::ws_routes;
-use axum::{routing::get, Router};
-use sqlx::PgPool;
+use axum::routing::get;
+use axum::Router;
+use sea_orm::DatabaseConnection;
 
-pub fn get_routes(pool: PgPool) -> Router {
+pub fn get_routes(db: DatabaseConnection) -> Router {
     Router::new()
         .route("/health", get(|| async { "OK" }))
-        .merge(ws_routes(pool))
+        .merge(ws_routes(db))
 }
