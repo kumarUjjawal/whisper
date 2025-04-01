@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 use tracing::info;
+
 type SharedState = Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>;
 
 pub async fn web_socket_handler(
@@ -63,7 +64,25 @@ pub async fn handle_socket(socket: WebSocket, db: DatabaseConnection, state: Sha
             return;
         }
     };
+    fn broadcast_status_update(
+        state: &HashMap<String, broadcast::Sender<String>>,
+        username: &str,
+        is_online: bool,
+    ) {
+        let status_message = if is_online {
+            format!("System: User '{}' is online", username)
+        } else {
+            format!("System: User '{}' went offline", username)
+        };
 
+        // Send status update to all connected users
+        for (user, tx) in state {
+            // Don't send the notification to the user who triggered it
+            if user != username {
+                let _ = tx.send(status_message.clone());
+            }
+        }
+    }
     // Send message history to the user
     send_message_history(&mut sender, &username, &db).await;
 
@@ -160,6 +179,11 @@ pub async fn handle_socket(socket: WebSocket, db: DatabaseConnection, state: Sha
 
     // Clean up when user disconnects
     let _ = sender_handle.abort(); // Abort the sender task
+                                   // Broadcast that user went offline before removing from state
+    {
+        let state_guard = state.lock().await;
+        broadcast_status_update(&state_guard, &username, false);
+    }
     state.lock().await.remove(&username);
     info!("User {} disconnected", username);
 }
