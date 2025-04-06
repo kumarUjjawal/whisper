@@ -22,7 +22,6 @@ pub async fn run() {
 
     let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
     let firebase_api_key = std::env::var("FIREBASE_API_KEY").expect("FIREBASE_API_KEY must be set");
-    println!("Using Firebase API Key: {}", firebase_api_key);
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST])
