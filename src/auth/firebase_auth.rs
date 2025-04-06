@@ -44,7 +44,7 @@ fn extract_token(headers: &HeaderMap) -> Option<String> {
     }
 }
 
-async fn verify_firebase_token(id_token: &str) -> Result<Claims, String> {
+pub async fn verify_firebase_token(id_token: &str) -> Result<Claims, String> {
     let header = decode_header(id_token).map_err(|e| e.to_string())?;
     let kid = header.kid.ok_or("Missing `kid` in token header")?;
 

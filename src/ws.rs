@@ -1,7 +1,8 @@
+use crate::auth::verify_firebase_token;
 use crate::entity::{messages, users, Messages, Users};
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::State,
+    extract::{Query, State},
     response::IntoResponse,
     routing::get,
     Router,
@@ -11,59 +12,73 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
     QuerySelect, Set,
 };
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 use tracing::info;
-
 type SharedState = Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>;
+
+#[derive(Deserialize)]
+pub struct WsParams {
+    token: String,
+}
 
 pub async fn web_socket_handler(
     ws: WebSocketUpgrade,
+    Query(WsParams { token }): Query<WsParams>,
     State((db, state)): State<(DatabaseConnection, SharedState)>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| {
-        let db = db.clone();
-        async move {
-            handle_socket(socket, db, state).await;
+    match verify_firebase_token(&token).await {
+        Ok(claims) => {
+            let uid = claims.sub.clone(); // Firebase UID
+
+            ws.on_upgrade(move |socket| {
+                let db = db.clone();
+                let state = state.clone();
+                let uid = uid.clone();
+
+                // return an async block
+                async move {
+                    handle_socket(socket, db, state, uid).await;
+                }
+            })
         }
-    })
+        Err(_) => (
+            axum::http::StatusCode::UNAUTHORIZED,
+            "Invalid or expired token",
+        )
+            .into_response(),
+    }
 }
 
-pub async fn handle_socket(socket: WebSocket, db: DatabaseConnection, state: SharedState) {
+pub async fn handle_socket(
+    socket: WebSocket,
+    db: DatabaseConnection,
+    state: SharedState,
+    uid: String,
+) {
     info!("WebSocket connection");
 
     // Split the socket into a sender and receiver
     let (mut sender, mut receiver) = socket.split();
 
-    let username = match receiver.next().await {
-        Some(Ok(Message::Text(name))) => {
-            let name = name.trim().to_string();
-            info!("User {} connected", name);
+    // Fetch user from DB using UID (Firebase UID is stored as username)
+    let user = Users::find()
+        .filter(users::Column::Username.eq(&uid))
+        .one(&db)
+        .await
+        .unwrap();
 
-            // Check if user exists in the database, create if not
-            let user = Users::find()
-                .filter(users::Column::Username.eq(&name))
-                .one(&db)
-                .await
-                .unwrap();
-
-            if user.is_none() {
-                // Create new user
-                let user = users::ActiveModel {
-                    username: Set(name.clone()),
-                    ..Default::default()
-                };
-                let _ = user.insert(&db).await.unwrap();
-            }
-
-            name
-        }
-        _ => {
-            // Invalid connection attempt without username
+    let user = match user {
+        Some(user) => user,
+        None => {
+            info!("❌ No user found with UID {}, closing connection", uid);
             return;
         }
     };
+
+    let username = user.username.clone();
     fn broadcast_status_update(
         state: &HashMap<String, broadcast::Sender<String>>,
         username: &str,
