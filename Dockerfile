@@ -12,7 +12,7 @@ COPY src ./src
 RUN cargo build --release
 
 # Use a smaller runtime image
-FROM debian:buster-slim
+FROM debian:bookworm-slim
 
 # Install required libraries (if any)
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
