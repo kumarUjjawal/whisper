@@ -50,6 +50,7 @@ pub async fn verify_token_and_upsert_user(
         StatusCode::BAD_REQUEST,
         "No phone number in token".to_string(),
     ))?;
+    let uid = claims.user_id.clone();
 
     let existing_user = users::Entity::find()
         .filter(users::Column::PhoneNumber.eq(phone_number.clone()))
@@ -62,7 +63,7 @@ pub async fn verify_token_and_upsert_user(
     } else {
         let now = Utc::now();
         let new_user = users::ActiveModel {
-            username: Set(generate_username(&phone_number)),
+            username: Set(uid.clone()),
             phone_number: Set(phone_number.clone()),
             created_at: Set(Some(now)),
             updated_at: Set(Some(now)),
@@ -81,9 +82,9 @@ pub async fn verify_token_and_upsert_user(
     }))
 }
 
-fn generate_username(phone: &str) -> String {
-    format!("user_{}", &phone[phone.len().saturating_sub(4)..])
-}
+// fn generate_username(phone: &str) -> String {
+//     format!("user_{}", &phone[phone.len().saturating_sub(4)..])
+// }
 
 fn internal_error<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
