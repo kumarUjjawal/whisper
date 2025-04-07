@@ -18,7 +18,7 @@ FROM debian:buster-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # Copy compiled binary
-COPY --from=builder /app/target/release/whisper /usr/local/bin/app
+COPY --from=builder /app/target/release/whisper ./app
 
 # Expose your backend port (adjust if different)
 EXPOSE 3000
