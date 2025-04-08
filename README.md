@@ -134,23 +134,6 @@ wscat -c "wss://whisper-production-xxxx.up.railway.app/ws?token=<FIREBASE_ID_TOK
 
 ---
 
-## 🧱 Project Structure
-
-```
-src/
-│
-├── auth/         # Firebase auth handlers and middleware
-├── db/           # DB connection setup
-├── entity/       # SeaORM-generated DB models
-├── handlers/     # HTTP route handlers
-├── models/       # Request/response DTOs
-├── routes/       # API and WebSocket routes
-├── ws/           # WebSocket logic
-└── main.rs       # App entrypoint
-```
-
----
-
 ## 🛠️ Future Improvements
 
 - ⏳ Message read receipts
